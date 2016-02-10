@@ -10,6 +10,8 @@ import (
 	"github.com/boltdb/bolt"
 )
 
+const rssEntryCount = 50
+
 func serveThumbs(w http.ResponseWriter, r *http.Request) {
 	parts := strings.SplitN(r.URL.Path, "/", 3)
 	if len(parts) != 3 {
@@ -72,9 +74,11 @@ func serveRSS(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<ttl>%v</ttl>`, config.PollMinutes*60)
 
 	datafile.View(func(tx *bolt.Tx) error {
-		illusts := tx.Bucket(illustrationsBucket)
+		cur := tx.Bucket(illustrationsBucket).Cursor()
 
-		illusts.ForEach(func(k, v []byte) error {
+		i := 0
+		k, v := cur.Last()
+		for k != nil && i < rssEntryCount {
 			var il Illust
 			mustDecodeJSON(v, &il)
 
@@ -86,8 +90,9 @@ func serveRSS(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `<link>%s</link>`, html.EscapeString(il.URL.String()))
 			fmt.Fprintf(w, `</item>`)
 
-			return nil
-		})
+			i++
+			k, v = cur.Prev()
+		}
 
 		return nil
 	})
