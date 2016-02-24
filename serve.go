@@ -4,67 +4,69 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"strings"
-
-	"github.com/boltdb/bolt"
 )
 
 const rssEntryCount = 50
 
 func serveThumbs(w http.ResponseWriter, r *http.Request) {
-	parts := strings.SplitN(r.URL.Path, "/", 3)
+	parts := strings.SplitN(r.URL.EscapedPath(), "/", 3)
 	if len(parts) != 3 {
 		http.NotFound(w, r)
 		return
 	}
 
-	id, err := hex.DecodeString(parts[2])
+	thumbURL, err := hex.DecodeString(parts[2])
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 
-	datafile.View(func(tx *bolt.Tx) error {
-		thumbs := tx.Bucket(thumbnailsBucket)
+	thumb, err := getThumbnail(string(thumbURL))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("Couldn't get thumbnail for %v: %v", string(thumbURL), err)
+		return
+	}
 
-		data := thumbs.Get(id)
-		if data == nil {
-			http.NotFound(w, r)
-			return nil
-		}
+	if thumb == nil {
+		http.NotFound(w, r)
+		return
+	}
 
-		w.Header().Set("Content-Type", http.DetectContentType(data))
-		w.Write(data)
-
-		return nil
-	})
+	w.WriteHeader(http.StatusOK)
+	w.Write(thumb.Data)
 }
 
 func serveIndex(w http.ResponseWriter, r *http.Request) {
+	illusts, err := recentIllustrations()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("Couldn't get illustrations: %v", err)
+		return
+	}
+
 	w.Write([]byte("<!DOCTYPE html>"))
 	w.Write([]byte("<html><body>"))
 
-	datafile.View(func(tx *bolt.Tx) error {
-		illusts := tx.Bucket(illustrationsBucket)
-
-		illusts.ForEach(func(k, v []byte) error {
-			var il Illust
-			mustDecodeJSON(v, &il)
-
-			fmt.Fprintf(w, `<div><a rel="noreferrer" href="%s"><img src="thumbs/%s"> %s - %s</a></div>`,
-				html.EscapeString(il.URL.String()), hex.EncodeToString(k), html.EscapeString(il.Author), html.EscapeString(il.Title))
-
-			return nil
-		})
-
-		return nil
-	})
+	for _, il := range illusts {
+		fmt.Fprintf(w, `<div><a rel="noreferrer" href="%s"><img src="thumbs/%s"> %s - %s</a></div>`,
+			html.EscapeString(il.URL), hex.EncodeToString([]byte(il.ThumbnailURL)), html.EscapeString(il.Author), html.EscapeString(il.Title))
+	}
 
 	w.Write([]byte("</body></html>"))
 }
 
 func serveRSS(w http.ResponseWriter, r *http.Request) {
+	illusts, err := recentIllustrations()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("Couldn't get illustrations: %v", err)
+		return
+	}
+
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8" ?>`+"\n")
 	fmt.Fprintf(w, `<rss version="2.0">`)
 	fmt.Fprintf(w, `<channel>`)
@@ -73,29 +75,15 @@ func serveRSS(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<link>http://www.pixiv.net/bookmark_new_illust.php</link>`)
 	fmt.Fprintf(w, `<ttl>%v</ttl>`, config.PollMinutes*60)
 
-	datafile.View(func(tx *bolt.Tx) error {
-		cur := tx.Bucket(illustrationsBucket).Cursor()
-
-		i := 0
-		k, v := cur.Last()
-		for k != nil && i < rssEntryCount {
-			var il Illust
-			mustDecodeJSON(v, &il)
-
-			fmt.Fprintf(w, `<item>`)
-			fmt.Fprintf(w, `<title>%s - %s</title>`, html.EscapeString(il.Author), html.EscapeString(il.Title))
-			desc := fmt.Sprintf(`<a rel="noreferrer" href="%s"><img src="thumbs/%s"><br>%s - %s</a>`,
-				html.EscapeString(il.URL.String()), hex.EncodeToString(k), html.EscapeString(il.Author), html.EscapeString(il.Title))
-			fmt.Fprintf(w, `<description>%s</description>`, html.EscapeString(desc))
-			fmt.Fprintf(w, `<link>%s</link>`, html.EscapeString(il.URL.String()))
-			fmt.Fprintf(w, `</item>`)
-
-			i++
-			k, v = cur.Prev()
-		}
-
-		return nil
-	})
+	for _, il := range illusts {
+		fmt.Fprintf(w, `<item>`)
+		fmt.Fprintf(w, `<title>%s - %s</title>`, html.EscapeString(il.Author), html.EscapeString(il.Title))
+		desc := fmt.Sprintf(`<a rel="noreferrer" href="%s"><img src="thumbs/%s"><br>%s - %s</a>`,
+			html.EscapeString(il.URL), hex.EncodeToString([]byte(il.ThumbnailURL)), html.EscapeString(il.Author), html.EscapeString(il.Title))
+		fmt.Fprintf(w, `<description>%s</description>`, html.EscapeString(desc))
+		fmt.Fprintf(w, `<link>%s</link>`, html.EscapeString(il.URL))
+		fmt.Fprintf(w, `</item>`)
+	}
 
 	fmt.Fprintf(w, `</channel></rss>`)
 }

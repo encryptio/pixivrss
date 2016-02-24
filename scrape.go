@@ -1,24 +1,39 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/json"
-	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/boltdb/bolt"
 	"golang.org/x/net/html/charset"
+	"golang.org/x/net/publicsuffix"
 )
 
 const (
 	userAgent = "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36"
 )
+
+var client http.Client
+
+func init() {
+	var err error
+	client.Jar, err = cookiejar.New(&cookiejar.Options{
+		PublicSuffixList: publicsuffix.List,
+	})
+	if err != nil {
+		die("Couldn't initialize cookie jar: %v", err)
+	}
+
+	client.Timeout = time.Second * 30
+
+	rand.Seed(time.Now().UnixNano())
+}
 
 func mustEncodeJSON(i interface{}) []byte {
 	data, err := json.Marshal(i)
@@ -36,8 +51,8 @@ func mustDecodeJSON(data []byte, i interface{}) {
 }
 
 func pollPixiv() {
-	fmt.Printf("Polling for new illustrations\n")
-	defer fmt.Printf("Poll complete\n")
+	log.Printf("Polling for new illustrations\n")
+	defer log.Printf("Poll complete\n")
 
 	found := 0
 	for _, pageName := range []string{
@@ -47,19 +62,19 @@ func pollPixiv() {
 
 		resp, err := client.Get("http://www.pixiv.net/" + pageName)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't GET new illustrations page: %v\n", err)
+			log.Printf("Couldn't GET new illustrations page: %v\n", err)
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			fmt.Fprintf(os.Stderr, "Couldn't GET new illustrations page: got status %v\n", resp.Status)
+			log.Printf("Couldn't GET new illustrations page: got status %v\n", resp.Status)
 			return
 		}
 
 		if strings.Contains(resp.Request.URL.String(), "return_to") {
 			// need to log in.
-			fmt.Printf("Logging into pixiv\n")
+			log.Printf("Logging into pixiv\n")
 
 			data := "mode=login&return_to=%2F" + pageName + "&skip=1" +
 				"&pixiv_id=" + url.QueryEscape(config.Username) +
@@ -72,18 +87,18 @@ func pollPixiv() {
 
 			resp2, err := client.Do(req)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Couldn't POST to login page: %v\n", err)
+				log.Printf("Couldn't POST to login page: %v\n", err)
 				return
 			}
 			defer resp2.Body.Close()
 
 			if resp2.StatusCode < 200 || resp2.StatusCode >= 300 {
-				fmt.Fprintf(os.Stderr, "Couldn't POST to login page: got status %v\n", resp.Status)
+				log.Printf("Couldn't POST to login page: got status %v\n", resp.Status)
 				return
 			}
 
 			if resp2.Request.URL.Path != "/"+pageName {
-				fmt.Fprintf(os.Stderr, "Was not at illustration after attempted login. Bad username/password?\n")
+				log.Printf("Was not at illustration after attempted login. Bad username/password?\n")
 				return
 			}
 
@@ -92,13 +107,13 @@ func pollPixiv() {
 
 		r, err := charset.NewReader(resp.Body, resp.Header.Get("Content-Type"))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't decode response charset: %v\n", err)
+			log.Printf("Couldn't decode response charset: %v\n", err)
 			return
 		}
 
 		doc, err := goquery.NewDocumentFromReader(r)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't parse HTML: %v\n", err)
+			log.Printf("Couldn't parse HTML: %v\n", err)
 			return
 		}
 
@@ -118,21 +133,24 @@ func pollPixiv() {
 				return
 			}
 			u = resp.Request.URL.ResolveReference(u)
+			urlStr := u.String()
 
 			title := h1.Text()
 
 			thumbSrc, _ := h1.Parent().Parent().Find("img._thumbnail").Attr("src")
 			thumbURL, _ := url.Parse(thumbSrc)
+			var thumbURLStr string
 			if thumbURL != nil {
 				thumbURL = resp.Request.URL.ResolveReference(thumbURL)
+				thumbURLStr = thumbURL.String()
 			}
 
 			author, _ := h1.Parent().Parent().Find("a.user[data-user_name]").Attr("data-user_name")
 
 			handleIllust(Illust{
-				URL:          u,
+				URL:          urlStr,
 				Title:        title,
-				ThumbnailURL: thumbURL,
+				ThumbnailURL: thumbURLStr,
 				Author:       author,
 				FirstSeen:    time.Now(),
 			})
@@ -140,43 +158,8 @@ func pollPixiv() {
 	}
 
 	if found == 0 {
-		fmt.Fprintf(os.Stderr, "Didn't find any illustrations on page; scraper is out of date\n")
+		log.Printf("Didn't find any illustrations on page; scraper is out of date\n")
 	}
-}
-
-func handleIllust(il Illust) {
-	err := datafile.Update(func(tx *bolt.Tx) error {
-		foundURLs := tx.Bucket(foundURLsBucket)
-		illusts := tx.Bucket(illustrationsBucket)
-
-		if foundURLs.Get([]byte(il.URL.String())) != nil {
-			return nil
-		}
-
-		foundURLs.Put([]byte(il.URL.String()), []byte{})
-
-		fmt.Printf("Found new illustration:\n")
-		fmt.Printf("Title: %v\n", il.Title)
-		fmt.Printf("Author: %v\n", il.Author)
-		fmt.Printf("URL: %v\n", il.URL)
-		fmt.Printf("Thumbnail URL: %v\n", il.ThumbnailURL)
-
-		id, err := illusts.NextSequence()
-		if err != nil {
-			return err
-		}
-		var idBuf [8]byte
-		binary.BigEndian.PutUint64(idBuf[:], id)
-
-		illusts.Put(idBuf[:], mustEncodeJSON(il))
-
-		return nil
-	})
-	if err != nil {
-		die("Couldn't update illustration in DB: %v\n", err)
-	}
-
-	pollThumbnailGrabber()
 }
 
 func readFromPixiv() {

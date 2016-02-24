@@ -1,57 +1,46 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
-
-	"github.com/boltdb/bolt"
 )
 
-var thumbnailReadyCh = make(chan struct{}, 1)
-
-func init() {
-	go func() {
-		for range thumbnailReadyCh {
-			getThumbnails()
-		}
-	}()
-}
-
-func pollThumbnailGrabber() {
-	select {
-	case thumbnailReadyCh <- struct{}{}:
-	default:
-	}
-}
-
 func getThumbnails() {
-	thumbsToGet := make(map[uint64]string)
-	datafile.View(func(tx *bolt.Tx) error {
-		illusts := tx.Bucket(illustrationsBucket)
-		thumbs := tx.Bucket(thumbnailsBucket)
+	changes := make(chan *Illust)
+	go illustrationChangesInto(changes)
+	for il := range changes {
+		if il.ThumbnailURL == "" {
+			continue
+		}
 
-		illusts.ForEach(func(k, v []byte) error {
-			if thumbs.Get(k) == nil {
-				var il Illust
-				mustDecodeJSON(v, &il)
-				thumbsToGet[binary.BigEndian.Uint64(k)] = il.ThumbnailURL.String()
-			}
+		has, err := thumbnailExists(il.ThumbnailURL)
+		if has || err != nil {
+			continue
+		}
 
-			return nil
+		data, err := downloadThumbnail(il.ThumbnailURL)
+		if err != nil {
+			log.Printf("Couldn't download thumbnail: %v", err)
+			continue
+		}
+
+		err = insertThumbnail(&Thumbnail{
+			URL:  il.ThumbnailURL,
+			Data: data,
 		})
+		if err != nil {
+			log.Printf("Couldn't insert thumbnail: %v", err)
+			continue
+		}
 
-		return nil
-	})
-
-	for id, url := range thumbsToGet {
-		getThumbnail(id, url)
+		fmt.Printf("Added thumbnail %v\n", il.ThumbnailURL)
 	}
 }
 
-func getThumbnail(id uint64, url string) {
+func downloadThumbnail(url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		panic(err)
@@ -61,42 +50,26 @@ func getThumbnail(id uint64, url string) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("Couldn't GET %v: %v\n", url, err)
-		return
+		return nil, fmt.Errorf("Couldn't GET %v: %v", url, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Printf("Couldn't GET %v: unexpected status %v\n", url, resp.Status)
-		return
+		return nil, fmt.Errorf("Couldn't GET %v: unexpected status %v", url, resp.Status)
 	}
 
 	data, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
-		fmt.Printf("Couldn't GET %v: %v\n", url, err)
-		return
+		return nil, fmt.Errorf("Couldn't GET %v: %v", url, err)
 	}
 
 	if len(data) == 1024*1024 {
-		fmt.Printf("Couldn't GET %v: response body too large\n", url)
-		return
+		return nil, fmt.Errorf("Couldn't GET %v: response body too large", url)
 	}
 
 	if len(data) == 0 {
-		fmt.Printf("Couldn't GET %v: response was empty\n", url)
-		return
+		return nil, fmt.Errorf("Couldn't GET %v: response was empty", url)
 	}
 
-	datafile.Update(func(tx *bolt.Tx) error {
-		thumbs := tx.Bucket(thumbnailsBucket)
-
-		var idBuf [8]byte
-		binary.BigEndian.PutUint64(idBuf[:], id)
-
-		thumbs.Put(idBuf[:], data)
-
-		return nil
-	})
-
-	fmt.Printf("Added thumbnail %v from %v\n", id, url)
+	return data, nil
 }
