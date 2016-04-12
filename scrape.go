@@ -79,7 +79,7 @@ func pollPixiv() {
 			data := "mode=login&return_to=%2F" + pageName + "&skip=1" +
 				"&pixiv_id=" + url.QueryEscape(config.Username) +
 				"&pass=" + url.QueryEscape(config.Password)
-			req, err := http.NewRequest("POST", "https://www.secure.pixiv.net/login.php", strings.NewReader(data))
+			req, err := http.NewRequest("POST", "https://www.pixiv.net/login.php", strings.NewReader(data))
 			if err != nil {
 				panic(err)
 			}
@@ -93,7 +93,7 @@ func pollPixiv() {
 			defer resp2.Body.Close()
 
 			if resp2.StatusCode < 200 || resp2.StatusCode >= 300 {
-				log.Printf("Couldn't POST to login page: got status %v\n", resp.Status)
+				log.Printf("Couldn't POST to login page: got status %v\n", resp2.Status)
 				return
 			}
 
