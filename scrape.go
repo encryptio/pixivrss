@@ -92,7 +92,7 @@ func pollPixiv() {
 			}
 			defer resp2.Body.Close()
 
-			if resp2.StatusCode < 200 || resp2.StatusCode >= 300 {
+			if resp2.StatusCode < 200 || resp2.StatusCode >= 400 {
 				log.Printf("Couldn't POST to login page: got status %v\n", resp2.Status)
 				return
 			}
